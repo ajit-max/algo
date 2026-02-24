@@ -9,35 +9,63 @@ from SmartApi import SmartConnect
 import pyotp
 import warnings
 from flask import Flask
+from collections import deque
 
 # Flask App setup
 app = Flask(__name__)
 warnings.filterwarnings("ignore")
 
+# Latest 100 lines of logs store karne ke liye (Website ke liye)
+logs_storage = deque(maxlen=100)
+
+def log_and_print(msg):
+    """Print bhi karega aur website logs mein bhi daalega"""
+    timestamp = dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted_msg = f"[{timestamp}] {msg}"
+    print(formatted_msg, flush=True)
+    logs_storage.appendleft(formatted_msg) # New logs at top
+
 # ================= CONFIG (Environment Variables) =================
-# Render ke dashboard mein ye sab keys zaroor daal dena
 API_KEY = os.getenv("API_KEY", "yRe368gf")
 CLIENT_ID = os.getenv("CLIENT_ID", "AABZ146183")
 PASSWORD = os.getenv("PASSWORD", "6211")
 TOTP_SECRET = os.getenv("TOTP_SECRET", "ZHFAFO7SKLYN3FNJOBPZYNEGQI")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8291109950:AAE-vcehleqwpl0Bc-2o1dlaUOEQNWw9r-4")
 CHAT_ID = os.getenv("CHAT_ID", "1901759813")
-
 INDEX_TOKEN = "99926000"  # NIFTY 50
 # =====================================================================
 
 @app.route('/')
 def home():
-    # Ye page Uptime Robot ko "Live" status dikhayega
-    now = dt.datetime.now().strftime('%H:%M:%S')
-    return f"Bot is running. Server Time: {now} (IST if TZ is set)"
+    return "<h3>Bot is Running!</h3><p>To see live activity, go to: <a href='/logs'>/logs</a></p>"
+
+@app.route('/logs')
+def show_logs():
+    """Website par logs dikhane ke liye hacker-style interface"""
+    html = "<html><head><title>Trading Bot Logs</title>"
+    html += "<meta http-equiv='refresh' content='30'>" # Auto-refresh every 30s
+    html += "<style>body{background:#0d1117; color:#58a6ff; font-family:monospace; padding:20px;} .ce{color:#238636;} .pe{color:#da3633;} .warn{color:#d29922;}</style></head><body>"
+    html += "<h2>🚀 Live Trading Activity</h2><hr style='border:0.5px solid #30363d;'>"
+    
+    if not logs_storage:
+        html += "<p>Waiting for market session or first scan...</p>"
+    else:
+        for log in logs_storage:
+            color_class = ""
+            if "CE" in log: color_class = "class='ce'"
+            elif "PE" in log: color_class = "class='pe'"
+            elif "⚠️" in log or "❌" in log: color_class = "class='warn'"
+            html += f"<div {color_class}>{log}</div>"
+            
+    html += "</body></html>"
+    return html
 
 def send_telegram_msg(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id={CHAT_ID}&text={msg}&parse_mode=Markdown"
     try:
         requests.get(url, timeout=10)
     except:
-        print("❌ Telegram Alert Failed!")
+        log_and_print("❌ Telegram Alert Failed!")
 
 def get_strike(price, opt_type):
     base = round(price / 50) * 50
@@ -47,39 +75,33 @@ def connect_angel():
     try:
         obj = SmartConnect(api_key=API_KEY)
         totp = pyotp.TOTP(TOTP_SECRET).now()
-        res = obj.generateSession(CLIENT_ID, PASSWORD, totp)
-        if res['status']:
-            print("✅ Angel One Connected!")
-            return obj
-        return None
+        obj.generateSession(CLIENT_ID, PASSWORD, totp)
+        log_and_print("✅ Angel One Connected Successfully!")
+        return obj
     except Exception as e:
-        print(f"❌ Connection Error: {e}")
+        log_and_print(f"❌ Connection Error: {e}")
         return None
 
 def live_scanner_logic():
+    log_and_print("📡 Scanner Background Thread Started...")
     obj = None
     trade_active = False
     current_trade = {}
-    
-    print("📡 Scanner Background Thread Started...")
 
     while True:
         try:
             now = dt.datetime.now()
             
-            # 1. Market Time Check (9:15 AM to 3:30 PM)
-            if dt.time(9,15) <= now.time() <= dt.time(15,35):
-                
-                # Agar market open hai aur session nahi hai, toh login karo
+            # Market Time Check (9:15 AM to 3:30 PM)
+            if dt.time(9,15) <= now.time() <= dt.time(15,30):
                 if obj is None:
                     obj = connect_angel()
-                    if obj:
-                        send_telegram_msg("🔄 *Bot Logged In* - Monitoring Started")
-                    else:
-                        time.sleep(60) # Login fail ho toh wait karo
+                    if obj: send_telegram_msg("🔄 *Bot Logged In* - Scanner Active")
+                    else: 
+                        time.sleep(60)
                         continue
 
-                # Data fetching
+                # Data Fetching
                 from_date = (now - dt.timedelta(days=7)).strftime("%Y-%m-%d 09:15")
                 to_date = now.strftime("%Y-%m-%d %H:%M")
                 
@@ -98,70 +120,65 @@ def live_scanner_logic():
                         rsi = talib.RSI(df['close'], 14).iloc[-1]
                         atr = talib.ATR(df['high'], df['low'], df['close'], 14).iloc[-1]
 
-                        # --- ENTRY ---
-                        if not trade_active:
-                            signal = ""
-                            if curr_price > ema200 and 60 < rsi < 75:
-                                signal = "CE"
-                            elif curr_price < ema200 and 25 < rsi < 40:
-                                signal = "PE"
+                        log_and_print(f"🔍 Price: {curr_price} | RSI: {round(rsi,2)} | EMA200: {round(ema200,2)}")
 
-                            if signal != "":
-                                strike = get_strike(curr_price, signal)
-                                sl = round(curr_price - (1.2 * atr), 1) if signal=="CE" else round(curr_price + (1.2 * atr), 1)
-                                tg = round(curr_price + (2.5 * atr), 1) if signal=="CE" else round(curr_price - (2.5 * atr), 1)
+                        if not trade_active:
+                            signal_type = ""
+                            if curr_price > ema200 and 60 < rsi < 75:
+                                signal_type = "CE"
+                            elif curr_price < ema200 and 25 < rsi < 40:
+                                signal_type = "PE"
+
+                            if signal_type != "":
+                                strike = get_strike(curr_price, signal_type)
+                                sl = round(curr_price - (1.2 * atr), 1) if signal_type=="CE" else round(curr_price + (1.2 * atr), 1)
+                                tg = round(curr_price + (2.5 * atr), 1) if signal_type=="CE" else round(curr_price - (2.5 * atr), 1)
                                 
-                                current_trade = {"type": signal, "entry": curr_price, "strike": strike, "sl": sl, "tg": tg}
-                                msg = (f"🚀 *ENTRY SIGNAL: NIFTY {signal}*\n\n"
-                                       f"📍 Index Entry: {curr_price}\n"
-                                       f"🎯 Strike: {strike} {signal}\n"
+                                current_trade = {"type": signal_type, "entry": curr_price, "strike": strike, "sl": sl, "tg": tg}
+                                msg = (f"🚀 *ENTRY SIGNAL: NIFTY {signal_type}*\n"
+                                       f"📍 Entry: {curr_price} | Strike: {strike}\n"
                                        f"🛑 SL: {sl} | 🏁 TG: {tg}")
                                 send_telegram_msg(msg)
+                                log_and_print(f"✅ ENTRY ALERT SENT: {signal_type}")
                                 trade_active = True
-
-                        # --- EXIT ---
                         else:
+                            # Monitoring for Exit
                             exit_triggered = False
                             reason = ""
                             if current_trade["type"] == "CE":
-                                if curr_price <= current_trade["sl"]: exit_triggered, reason = True, "SL Hit 🛑"
+                                if curr_price <= current_trade["sl"]: exit_triggered, reason = True, "StopLoss Hit 🛑"
                                 elif curr_price >= current_trade["tg"]: exit_triggered, reason = True, "Target Hit 🏁"
                             else: # PE
-                                if curr_price >= current_trade["sl"]: exit_triggered, reason = True, "SL Hit 🛑"
+                                if curr_price >= current_trade["sl"]: exit_triggered, reason = True, "StopLoss Hit 🛑"
                                 elif curr_price <= current_trade["tg"]: exit_triggered, reason = True, "Target Hit 🏁"
                             
-                            # Auto-exit at 3:10 PM
-                            if now.time() >= dt.time(15, 10): 
-                                exit_triggered, reason = True, "EOD Exit 🕒"
+                            if now.time() >= dt.time(15, 10): exit_triggered, reason = True, "EOD Exit 🕒"
 
                             if exit_triggered:
                                 pnl = round(curr_price - current_trade["entry"], 2) if current_trade["type"]=="CE" else round(current_trade["entry"] - curr_price, 2)
-                                send_telegram_msg(f"🔔 *EXIT: {reason}*\nPrice: {curr_price}\nPoints: {pnl}")
+                                send_telegram_msg(f"🔔 *EXIT: {reason}*\nPrice: {curr_price} | PnL: {pnl}")
+                                log_and_print(f"❌ EXIT ALERT SENT: {reason}")
                                 trade_active = False
                 
                 elif "TooManyRequests" in str(res.get('message', '')):
-                    print("🛑 Rate limit! Sleeping 70s...")
+                    log_and_print("🛑 API Rate Limit! Resting 70s...")
                     time.sleep(70)
-                
+
             else:
-                # Market Closed: Connection null kar do taaki kal naya bane
-                if obj is not None:
-                    obj = None
-                    print("💤 Market Closed. Session Cleared.")
-                time.sleep(300) # 5 min wait
+                if obj is not None: obj = None # Reset session daily
+                log_and_print("💤 Market Closed. Waiting for 9:15 AM...")
+                time.sleep(300)
 
         except Exception as e:
-            print(f"⚠️ Error: {e}")
+            log_and_print(f"⚠️ Loop Error: {e}")
             time.sleep(15)
         
-        time.sleep(60) # Every 1 minute scan
+        time.sleep(60)
 
 if __name__ == "__main__":
-    # 1. Start Scanner Thread
     t = threading.Thread(target=live_scanner_logic)
     t.daemon = True
     t.start()
     
-    # 2. Start Flask Web Server
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
