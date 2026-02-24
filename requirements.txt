@@ -1,0 +1,8 @@
+flask
+pandas
+smartapi-python
+pyotp
+requests
+TA-Lib
+logzero
+websocket
