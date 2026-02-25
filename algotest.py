@@ -35,30 +35,31 @@ def log_msg(msg, send_tg=True):
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
         except Exception as e:
-            print(f"⚠️ Telegram Error: {e}")
+            print(f"⚠️ Telegram Error: {e}", flush=True)
 
 def get_instrument_master():
-    url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
+    # 🔥 FIX: 100% Correct Angel Broking Server URL 🔥
+    url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
     for attempt in range(3):
         try:
-            print(f"📥 Downloading Instrument Master (Attempt {attempt+1})...", flush=True)
-            res = requests.get(url, headers=headers, timeout=10)
+            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] 📥 Downloading Instrument Master (Attempt {attempt+1})...", flush=True)
+            res = requests.get(url, headers=headers, timeout=20)
             if res.status_code == 200:
                 try:
                     df = pd.DataFrame(res.json())
                     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-                    print("✅ Instrument Master Downloaded Successfully!", flush=True)
+                    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ✅ Instrument Master Downloaded Successfully! Total symbols: {len(df)}", flush=True)
                     return df
                 except Exception as e:
-                    print(f"⚠️ JSON Parse Error: {e}", flush=True)
+                    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ JSON Parse Error: {e}", flush=True)
             else:
-                print(f"⚠️ Server returned status: {res.status_code}", flush=True)
+                print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Server returned status: {res.status_code}", flush=True)
         except Exception as e:
-            print(f"⚠️ Network Error: {e}", flush=True)
+            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Network Error: {e}", flush=True)
         time.sleep(3)
     
     log_msg("❌ FATAL: Could not fetch Instrument List from Angel One.")
@@ -88,16 +89,16 @@ def get_atm_option(df_master, spot_price, opt_type):
 
 def run_pro_engine():
     print("\n" + "="*50, flush=True)
-    print("🚀 INITIALIZING SMARTAPI CONNECTION...", flush=True)
+    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] 🚀 INITIALIZING SMARTAPI CONNECTION...", flush=True)
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
     obj.generateSession(CLIENT_ID, PASSWORD, totp)
-    print("✅ CONNECTION SUCCESSFUL!", flush=True)
+    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ✅ CONNECTION SUCCESSFUL!", flush=True)
     print("="*50 + "\n", flush=True)
     
     df_master = get_instrument_master()
     if df_master is None:
-        print("❌ Stopping bot. Fix Instrument Master issue.", flush=True)
+        print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ❌ Stopping bot. Fix Instrument Master issue.", flush=True)
         return
 
     trade_active = False
@@ -109,17 +110,18 @@ def run_pro_engine():
     while True:
         now = dt.datetime.now()
         
-        # Market Time Check
+        # 1. Market Time Check (Prints continuously even if market is closed)
         if not (dt.time(9,20) <= now.time() <= dt.time(15,10)):
-            print(f"[{now.strftime('%H:%M:%S')}] 💤 Market Closed. Waiting...", flush=True)
-            time.sleep(60); continue
+            print(f"[{now.strftime('%H:%M:%S')}] 💤 💓 Bot Alive - Market Closed. Waiting...", flush=True)
+            time.sleep(30) # Har 30 sec me zinda hone ka sabut dega
+            continue
             
         if daily_pnl <= -MAX_DAILY_LOSS:
             log_msg("⚠️ Max Daily Loss Reached. System Shutdown.")
             break
 
         try:
-            # 1. Get Data
+            # 2. Get Data
             df_15 = get_ohlc_data(obj, INDEX_TOKEN, "FIFTEEN_MINUTE")
             df_5 = get_ohlc_data(obj, INDEX_TOKEN, "FIVE_MINUTE")
             
@@ -133,9 +135,9 @@ def run_pro_engine():
             rsi_5 = talib.RSI(df_5['c'], 14).iloc[-1]
             trend = "BULL 🟢" if current_spot > ema_200_15 else "BEAR 🔴"
 
-            # === LIVE LOGGING PING ===
+            # === LIVE HEARTBEAT LOG (Yahan se aapko har 30 sec ka update milega) ===
             status = f"ACTIVE ({trade['symbol']})" if trade_active else "SEARCHING 🔍"
-            print(f"[{now.strftime('%H:%M:%S')}] Spot: {current_spot} | 15m Trend: {trend} | 5m RSI: {round(rsi_5, 2)} | Status: {status}", flush=True)
+            print(f"[{now.strftime('%H:%M:%S')}] 💓 Bot Alive | Spot: {current_spot} | 15m Trend: {trend} | 5m RSI: {round(rsi_5, 2)} | Status: {status}", flush=True)
 
             # 3. ENTRY LOGIC
             if not trade_active:
@@ -145,6 +147,9 @@ def run_pro_engine():
 
                 if direction:
                     token, symbol = get_atm_option(df_master, current_spot, direction)
+                    if token is None: 
+                        continue
+                    
                     opt_ltp = float(obj.ltpData("NFO", symbol, token)["data"]["ltp"])
                     
                     sl_points = opt_ltp * 0.15 
@@ -211,4 +216,3 @@ if __name__ == "__main__":
     server_thread.start()
     
     run_pro_engine()
-
