@@ -27,41 +27,41 @@ MAX_DAILY_LOSS = 3000      # Hard stop
 PAPER_TRADE = True         # Live karne ke liye False karein
 # =======================================================
 
-def send_telegram(msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
-    except: pass
+def log_msg(msg, send_tg=True):
+    """Logs to console and optionally sends to Telegram"""
+    print(f"\n[{dt.datetime.now().strftime('%H:%M:%S')}] 📢 {msg}", flush=True)
+    if send_tg:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
+        except Exception as e:
+            print(f"⚠️ Telegram Error: {e}")
 
 def get_instrument_master():
     url = "https://margincalculator.angelbroking.com/OpenAPI_Standard/v1/instrumentsJSON.json"
-    
-    # FIX: Adding User-Agent and Error Handling so Angel One doesn't block Cloud IPs
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
     for attempt in range(3):
         try:
-            print(f"📥 Downloading Instrument Master (Attempt {attempt+1})...")
+            print(f"📥 Downloading Instrument Master (Attempt {attempt+1})...", flush=True)
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 try:
-                    res_json = res.json()
-                    df = pd.DataFrame(res_json)
+                    df = pd.DataFrame(res.json())
                     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-                    print("✅ Instrument Master Success!")
+                    print("✅ Instrument Master Downloaded Successfully!", flush=True)
                     return df
                 except Exception as e:
-                    print(f"⚠️ JSON Parse Error (Got HTML?): {e}")
+                    print(f"⚠️ JSON Parse Error: {e}", flush=True)
             else:
-                print(f"⚠️ Server returned status: {res.status_code}")
+                print(f"⚠️ Server returned status: {res.status_code}", flush=True)
         except Exception as e:
-            print(f"⚠️ Network Error: {e}")
-        
-        time.sleep(3) # Retry delay
+            print(f"⚠️ Network Error: {e}", flush=True)
+        time.sleep(3)
     
-    send_telegram("❌ FATAL: Could not fetch Instrument List from Angel One.")
+    log_msg("❌ FATAL: Could not fetch Instrument List from Angel One.")
     return None
 
 def get_ohlc_data(obj, token, interval, days=5):
@@ -87,58 +87,70 @@ def get_atm_option(df_master, spot_price, opt_type):
     return (df.iloc[0]['token'], df.iloc[0]['symbol']) if not df.empty else (None, None)
 
 def run_pro_engine():
+    print("\n" + "="*50, flush=True)
+    print("🚀 INITIALIZING SMARTAPI CONNECTION...", flush=True)
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
     obj.generateSession(CLIENT_ID, PASSWORD, totp)
+    print("✅ CONNECTION SUCCESSFUL!", flush=True)
+    print("="*50 + "\n", flush=True)
     
     df_master = get_instrument_master()
     if df_master is None:
-        print("❌ Stopping bot. Fix Instrument Master issue.")
-        return # Prevents the bot from running without data
+        print("❌ Stopping bot. Fix Instrument Master issue.", flush=True)
+        return
 
     trade_active = False
     trade = {}
     daily_pnl = 0
     
-    send_telegram("💎 PRO-BOT ACTIVE\nStrategy: 15m Trend + 5m Momentum")
+    log_msg("💎 PRO-BOT ACTIVE\nStrategy: 15m Trend + 5m Momentum\nMode: " + ("PAPER" if PAPER_TRADE else "LIVE"))
 
     while True:
         now = dt.datetime.now()
+        
+        # Market Time Check
         if not (dt.time(9,20) <= now.time() <= dt.time(15,10)):
-            time.sleep(30); continue
+            print(f"[{now.strftime('%H:%M:%S')}] 💤 Market Closed. Waiting...", flush=True)
+            time.sleep(60); continue
             
         if daily_pnl <= -MAX_DAILY_LOSS:
-            send_telegram("⚠️ Max Daily Loss Reached. System Shutdown.")
+            log_msg("⚠️ Max Daily Loss Reached. System Shutdown.")
             break
 
         try:
-            # 1. Higher Timeframe Trend (15 Min)
+            # 1. Get Data
             df_15 = get_ohlc_data(obj, INDEX_TOKEN, "FIFTEEN_MINUTE")
+            df_5 = get_ohlc_data(obj, INDEX_TOKEN, "FIVE_MINUTE")
+            
+            if df_15 is None or df_5 is None:
+                print(f"[{now.strftime('%H:%M:%S')}] ⚠️ API returned empty data. Retrying...", flush=True)
+                time.sleep(10); continue
+
+            # Technicals
             ema_200_15 = talib.EMA(df_15['c'], 200).iloc[-1]
             current_spot = df_15['c'].iloc[-1]
-            
-            trend = "BULL" if current_spot > ema_200_15 else "BEAR"
-
-            # 2. Execution Timeframe (5 Min)
-            df_5 = get_ohlc_data(obj, INDEX_TOKEN, "FIVE_MINUTE")
             rsi_5 = talib.RSI(df_5['c'], 14).iloc[-1]
+            trend = "BULL 🟢" if current_spot > ema_200_15 else "BEAR 🔴"
 
-            # 3. ENTRY LOGIC (Trend + Momentum)
+            # === LIVE LOGGING PING ===
+            status = f"ACTIVE ({trade['symbol']})" if trade_active else "SEARCHING 🔍"
+            print(f"[{now.strftime('%H:%M:%S')}] Spot: {current_spot} | 15m Trend: {trend} | 5m RSI: {round(rsi_5, 2)} | Status: {status}", flush=True)
+
+            # 3. ENTRY LOGIC
             if not trade_active:
                 direction = None
-                if trend == "BULL" and rsi_5 > 65: direction = "CE"
-                elif trend == "BEAR" and rsi_5 < 35: direction = "PE"
+                if "BULL" in trend and rsi_5 > 65: direction = "CE"
+                elif "BEAR" in trend and rsi_5 < 35: direction = "PE"
 
                 if direction:
                     token, symbol = get_atm_option(df_master, current_spot, direction)
                     opt_ltp = float(obj.ltpData("NFO", symbol, token)["data"]["ltp"])
                     
-                    # Risk Management
-                    sl_points = opt_ltp * 0.15 # 15% Initial SL
+                    sl_points = opt_ltp * 0.15 
                     qty = int((CAPITAL * RISK_PER_TRADE_PCT) // (sl_points * LOT_SIZE)) * LOT_SIZE
                     
                     if qty >= LOT_SIZE:
-                        # Place Market Order
                         if not PAPER_TRADE:
                             obj.placeOrder({"variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": token,
                                           "transactiontype": "BUY", "exchange": "NFO", "ordertype": "MARKET",
@@ -147,21 +159,22 @@ def run_pro_engine():
                         trade = {"symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty, 
                                  "sl": opt_ltp - sl_points, "target": opt_ltp + (sl_points * 2)}
                         trade_active = True
-                        send_telegram(f"🚀 TRADE TAKEN: {symbol}\nPrice: {opt_ltp}\nTarget: {round(trade['target'],2)}")
+                        log_msg(f"🚀 ENTRY SIGNAL: {symbol}\nPrice: {opt_ltp}\nSL: {round(trade['sl'],2)}\nTarget: {round(trade['target'],2)}\nQty: {qty}")
 
             # 4. EXIT & PRO TRAILING
             else:
                 ltp = float(obj.ltpData("NFO", trade['symbol'], trade['token'])["data"]["ltp"])
+                print(f"   ↳ [TRADE LIVE] Target: {round(trade['target'],2)} | LTP: {ltp} | SL: {round(trade['sl'],2)}", flush=True)
                 
-                # Trailing Stop-Loss (Move to Break Even after 10% gain)
+                # Trailing SL
                 if ltp > trade['entry'] * 1.10 and trade['sl'] < trade['entry']:
                     trade['sl'] = trade['entry']
-                    send_telegram(f"🛡️ SL Moved to Cost for {trade['symbol']}")
+                    log_msg(f"🛡️ SL Trailed to Cost ({trade['entry']}) for {trade['symbol']}")
 
                 reason = None
-                if ltp <= trade['sl']: reason = "StopLoss Hit"
+                if ltp <= trade['sl']: reason = "StopLoss Hit 🛑"
                 elif ltp >= trade['target']: reason = "Target Hit 🎯"
-                elif now.time() >= dt.time(15,10): reason = "EOD Square-off"
+                elif now.time() >= dt.time(15,10): reason = "EOD Square-off 🕒"
 
                 if reason:
                     if not PAPER_TRADE:
@@ -171,11 +184,11 @@ def run_pro_engine():
                     
                     pnl = (ltp - trade['entry']) * trade['qty']
                     daily_pnl += pnl
-                    send_telegram(f"🏁 EXIT: {reason}\nPnL: ₹{round(pnl,2)}")
+                    log_msg(f"🏁 EXIT ALERT: {reason}\nSymbol: {trade['symbol']}\nExit Price: {ltp}\nTrade PnL: ₹{round(pnl,2)}\nTotal Daily PnL: ₹{round(daily_pnl,2)}")
                     trade_active = False
 
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Loop Error: {e}", flush=True)
             time.sleep(10)
         
         time.sleep(30)
@@ -193,10 +206,8 @@ def start_server():
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # 1. Flask ko background thread mein chalu karein
     server_thread = threading.Thread(target=start_server)
     server_thread.daemon = True
     server_thread.start()
     
-    # 2. Apna bot chalu karein
     run_pro_engine()
