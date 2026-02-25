@@ -35,10 +35,34 @@ def send_telegram(msg):
 
 def get_instrument_master():
     url = "https://margincalculator.angelbroking.com/OpenAPI_Standard/v1/instrumentsJSON.json"
-    res = requests.get(url).json()
-    df = pd.DataFrame(res)
-    df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-    return df
+    
+    # FIX: Adding User-Agent and Error Handling so Angel One doesn't block Cloud IPs
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    for attempt in range(3):
+        try:
+            print(f"📥 Downloading Instrument Master (Attempt {attempt+1})...")
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                try:
+                    res_json = res.json()
+                    df = pd.DataFrame(res_json)
+                    df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
+                    print("✅ Instrument Master Success!")
+                    return df
+                except Exception as e:
+                    print(f"⚠️ JSON Parse Error (Got HTML?): {e}")
+            else:
+                print(f"⚠️ Server returned status: {res.status_code}")
+        except Exception as e:
+            print(f"⚠️ Network Error: {e}")
+        
+        time.sleep(3) # Retry delay
+    
+    send_telegram("❌ FATAL: Could not fetch Instrument List from Angel One.")
+    return None
 
 def get_ohlc_data(obj, token, interval, days=5):
     now = dt.datetime.now()
@@ -68,6 +92,10 @@ def run_pro_engine():
     obj.generateSession(CLIENT_ID, PASSWORD, totp)
     
     df_master = get_instrument_master()
+    if df_master is None:
+        print("❌ Stopping bot. Fix Instrument Master issue.")
+        return # Prevents the bot from running without data
+
     trade_active = False
     trade = {}
     daily_pnl = 0
@@ -161,7 +189,7 @@ def home():
     return "✅ Algo Trading Bot is Running Live!"
 
 def start_server():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
