@@ -25,44 +25,51 @@ CAPITAL = 50000
 RISK_PER_TRADE_PCT = 0.02  # 2% Risk
 MAX_DAILY_LOSS = 3000      # Hard stop
 PAPER_TRADE = True         # Live karne ke liye False karein
+LOG_FILE = "bot_logs.txt"  # Live web logs ke liye file
 # =======================================================
 
-def log_msg(msg, send_tg=True):
-    """Logs to console and optionally sends to Telegram"""
-    print(f"\n[{dt.datetime.now().strftime('%H:%M:%S')}] 📢 {msg}", flush=True)
+def custom_print(msg, send_tg=False):
+    """Console print + Web Log File save + Optional Telegram"""
+    time_str = dt.datetime.now().strftime('%H:%M:%S')
+    full_msg = f"[{time_str}] {msg}"
+    
+    # 1. Print in Render Dashboard
+    print(full_msg, flush=True)
+    
+    # 2. Save for Web Browser (/logs URL)
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(full_msg + "<br>")
+    except: pass
+    
+    # 3. Send to Telegram
     if send_tg:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
+            requests.post(url, data={"chat_id": CHAT_ID, "text": f"📢 {msg}"}, timeout=5)
         except Exception as e:
-            print(f"⚠️ Telegram Error: {e}", flush=True)
+            print(f"[{time_str}] ⚠️ Telegram Error: {e}", flush=True)
 
 def get_instrument_master():
-    # 🔥 FIX: 100% Correct Angel Broking Server URL 🔥
     url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
     for attempt in range(3):
         try:
-            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] 📥 Downloading Instrument Master (Attempt {attempt+1})...", flush=True)
+            custom_print(f"📥 Downloading Instrument Master (Attempt {attempt+1})...")
             res = requests.get(url, headers=headers, timeout=20)
             if res.status_code == 200:
-                try:
-                    df = pd.DataFrame(res.json())
-                    df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-                    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ✅ Instrument Master Downloaded Successfully! Total symbols: {len(df)}", flush=True)
-                    return df
-                except Exception as e:
-                    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ JSON Parse Error: {e}", flush=True)
+                df = pd.DataFrame(res.json())
+                df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
+                custom_print(f"✅ Instrument Master Downloaded Successfully! Total symbols: {len(df)}")
+                return df
             else:
-                print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Server returned status: {res.status_code}", flush=True)
+                custom_print(f"⚠️ Server returned status: {res.status_code}")
         except Exception as e:
-            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Network Error: {e}", flush=True)
+            custom_print(f"⚠️ Network Error: {e}")
         time.sleep(3)
     
-    log_msg("❌ FATAL: Could not fetch Instrument List from Angel One.")
+    custom_print("❌ FATAL: Could not fetch Instrument List.", send_tg=True)
     return None
 
 def get_ohlc_data(obj, token, interval, days=5):
@@ -88,45 +95,47 @@ def get_atm_option(df_master, spot_price, opt_type):
     return (df.iloc[0]['token'], df.iloc[0]['symbol']) if not df.empty else (None, None)
 
 def run_pro_engine():
-    print("\n" + "="*50, flush=True)
-    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] 🚀 INITIALIZING SMARTAPI CONNECTION...", flush=True)
+    # Pehle purani log file delete kar dete hain naye session ke liye
+    if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
+    
+    custom_print("="*50)
+    custom_print("🚀 INITIALIZING SMARTAPI CONNECTION...")
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
     obj.generateSession(CLIENT_ID, PASSWORD, totp)
-    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ✅ CONNECTION SUCCESSFUL!", flush=True)
-    print("="*50 + "\n", flush=True)
+    custom_print("✅ CONNECTION SUCCESSFUL!")
+    custom_print("="*50)
     
     df_master = get_instrument_master()
     if df_master is None:
-        print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ❌ Stopping bot. Fix Instrument Master issue.", flush=True)
+        custom_print("❌ Stopping bot. Fix Instrument Master issue.")
         return
 
     trade_active = False
     trade = {}
     daily_pnl = 0
     
-    log_msg("💎 PRO-BOT ACTIVE\nStrategy: 15m Trend + 5m Momentum\nMode: " + ("PAPER" if PAPER_TRADE else "LIVE"))
+    custom_print("💎 PRO-BOT ACTIVE | Strategy: 15m Trend + 5m Momentum", send_tg=True)
 
     while True:
         now = dt.datetime.now()
         
-        # 1. Market Time Check (Prints continuously even if market is closed)
+        # Market Time Check
         if not (dt.time(9,20) <= now.time() <= dt.time(15,10)):
-            print(f"[{now.strftime('%H:%M:%S')}] 💤 💓 Bot Alive - Market Closed. Waiting...", flush=True)
-            time.sleep(30) # Har 30 sec me zinda hone ka sabut dega
+            custom_print("💤 💓 Bot Alive - Market Closed. Waiting...")
+            time.sleep(30)
             continue
             
         if daily_pnl <= -MAX_DAILY_LOSS:
-            log_msg("⚠️ Max Daily Loss Reached. System Shutdown.")
+            custom_print("⚠️ Max Daily Loss Reached. System Shutdown.", send_tg=True)
             break
 
         try:
-            # 2. Get Data
             df_15 = get_ohlc_data(obj, INDEX_TOKEN, "FIFTEEN_MINUTE")
             df_5 = get_ohlc_data(obj, INDEX_TOKEN, "FIVE_MINUTE")
             
             if df_15 is None or df_5 is None:
-                print(f"[{now.strftime('%H:%M:%S')}] ⚠️ API returned empty data. Retrying...", flush=True)
+                custom_print("⚠️ API returned empty data. Retrying...")
                 time.sleep(10); continue
 
             # Technicals
@@ -135,9 +144,9 @@ def run_pro_engine():
             rsi_5 = talib.RSI(df_5['c'], 14).iloc[-1]
             trend = "BULL 🟢" if current_spot > ema_200_15 else "BEAR 🔴"
 
-            # === LIVE HEARTBEAT LOG (Yahan se aapko har 30 sec ka update milega) ===
+            # === LIVE HEARTBEAT ===
             status = f"ACTIVE ({trade['symbol']})" if trade_active else "SEARCHING 🔍"
-            print(f"[{now.strftime('%H:%M:%S')}] 💓 Bot Alive | Spot: {current_spot} | 15m Trend: {trend} | 5m RSI: {round(rsi_5, 2)} | Status: {status}", flush=True)
+            custom_print(f"💓 Bot Alive | Spot: {current_spot} | 15m Trend: {trend} | 5m RSI: {round(rsi_5, 2)} | Status: {status}")
 
             # 3. ENTRY LOGIC
             if not trade_active:
@@ -147,11 +156,9 @@ def run_pro_engine():
 
                 if direction:
                     token, symbol = get_atm_option(df_master, current_spot, direction)
-                    if token is None: 
-                        continue
+                    if token is None: continue
                     
                     opt_ltp = float(obj.ltpData("NFO", symbol, token)["data"]["ltp"])
-                    
                     sl_points = opt_ltp * 0.15 
                     qty = int((CAPITAL * RISK_PER_TRADE_PCT) // (sl_points * LOT_SIZE)) * LOT_SIZE
                     
@@ -164,17 +171,17 @@ def run_pro_engine():
                         trade = {"symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty, 
                                  "sl": opt_ltp - sl_points, "target": opt_ltp + (sl_points * 2)}
                         trade_active = True
-                        log_msg(f"🚀 ENTRY SIGNAL: {symbol}\nPrice: {opt_ltp}\nSL: {round(trade['sl'],2)}\nTarget: {round(trade['target'],2)}\nQty: {qty}")
+                        custom_print(f"🚀 ENTRY SIGNAL: {symbol} | Price: {opt_ltp} | Qty: {qty}", send_tg=True)
 
             # 4. EXIT & PRO TRAILING
             else:
                 ltp = float(obj.ltpData("NFO", trade['symbol'], trade['token'])["data"]["ltp"])
-                print(f"   ↳ [TRADE LIVE] Target: {round(trade['target'],2)} | LTP: {ltp} | SL: {round(trade['sl'],2)}", flush=True)
+                custom_print(f"↳ [TRADE LIVE] Target: {round(trade['target'],2)} | LTP: {ltp} | SL: {round(trade['sl'],2)}")
                 
                 # Trailing SL
                 if ltp > trade['entry'] * 1.10 and trade['sl'] < trade['entry']:
                     trade['sl'] = trade['entry']
-                    log_msg(f"🛡️ SL Trailed to Cost ({trade['entry']}) for {trade['symbol']}")
+                    custom_print(f"🛡️ SL Trailed to Cost ({trade['entry']}) for {trade['symbol']}", send_tg=True)
 
                 reason = None
                 if ltp <= trade['sl']: reason = "StopLoss Hit 🛑"
@@ -189,22 +196,47 @@ def run_pro_engine():
                     
                     pnl = (ltp - trade['entry']) * trade['qty']
                     daily_pnl += pnl
-                    log_msg(f"🏁 EXIT ALERT: {reason}\nSymbol: {trade['symbol']}\nExit Price: {ltp}\nTrade PnL: ₹{round(pnl,2)}\nTotal Daily PnL: ₹{round(daily_pnl,2)}")
+                    custom_print(f"🏁 EXIT ALERT: {reason} | Symbol: {trade['symbol']} | PnL: ₹{round(pnl,2)}", send_tg=True)
                     trade_active = False
 
         except Exception as e:
-            print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] ⚠️ Loop Error: {e}", flush=True)
+            custom_print(f"⚠️ Loop Error: {e}")
             time.sleep(10)
         
         time.sleep(30)
 
 
-# ================= FLASK SERVER (Render Keep-Alive) =================
+# ================= FLASK SERVER (Web Logs System) =================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Algo Trading Bot is Running Live!"
+    return "<h1>✅ Algo Trading Bot is Running Live!</h1><p>Go to <a href='/logs'>/logs</a> to see live terminal output.</p>"
+
+@app.route('/logs')
+def show_logs():
+    try:
+        with open(LOG_FILE, "r") as f:
+            # Sirf last 100 lines dikhayega taaki page load hone me time na lage
+            lines = f.readlines()[-100:]
+            content = "".join(lines)
+    except:
+        content = "Waiting for bot to generate logs..."
+        
+    # Ek cool 'Hacker' style black screen look
+    html = f"""
+    <html>
+        <head>
+            <title>Live Bot Logs</title>
+            <meta http-equiv="refresh" content="30"> </head>
+        <body style='background-color:black; color:lime; font-family:monospace; padding: 20px;'>
+            <h2>🚀 LIVE TRADING TERMINAL</h2>
+            <hr style='border-color:lime;'>
+            {content}
+        </body>
+    </html>
+    """
+    return html
 
 def start_server():
     port = int(os.environ.get("PORT", 10000))
