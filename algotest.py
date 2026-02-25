@@ -38,7 +38,7 @@ def log_msg(msg, send_tg=True):
             print(f"⚠️ Telegram Error: {e}")
 
 def get_instrument_master():
-    url = "https://margincalculator.angelbroking.com/OpenAPI_Standard/v1/instrumentsJSON.json"
+    url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
@@ -211,3 +211,4 @@ if __name__ == "__main__":
     server_thread.start()
     
     run_pro_engine()
+
