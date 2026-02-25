@@ -6,6 +6,8 @@ import requests
 import pyotp
 import warnings
 import os
+import threading
+from flask import Flask
 from SmartApi import SmartConnect
 
 warnings.filterwarnings("ignore")
@@ -150,5 +152,23 @@ def run_pro_engine():
         
         time.sleep(30)
 
+
+# ================= FLASK SERVER (Render Keep-Alive) =================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Algo Trading Bot is Running Live!"
+
+def start_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
 if __name__ == "__main__":
+    # 1. Flask ko background thread mein chalu karein
+    server_thread = threading.Thread(target=start_server)
+    server_thread.daemon = True
+    server_thread.start()
+    
+    # 2. Apna bot chalu karein
     run_pro_engine()
