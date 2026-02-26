@@ -131,7 +131,7 @@ def run_pro_engine():
         now = dt.datetime.now()
         
         # Market Time Check
-        if not (dt.time(9,20) <= now.time() <= dt.time(15,10)):
+        if not (dt.time(9,20) <= now.time() <= dt.time(15,30)):
             custom_print("💤 💓 Bot Alive - Market Closed. Waiting...")
             time.sleep(60)
             continue
@@ -256,3 +256,4 @@ if __name__ == "__main__":
     server_thread.start()
     
     run_pro_engine()
+
