@@ -19,7 +19,7 @@ PASSWORD = "6211"
 TOTP_SECRET = "ZHFAFO7SKLYN3FNJOBPZYNEGQI"
 TELEGRAM_TOKEN = "8291109950:AAE-vcehleqwpl0Bc-2o1dlaUOEQNWw9r-4"
 CHAT_ID = "1901759813"
-INDEX_TOKEN = "26000"      # 🔥 FIX: Nifty ka actual Token 26000 kar diya hai
+INDEX_TOKEN = "99926000"      # 🔥 FIX: Nifty ka actual Token 26000 kar diya hai
 LOT_SIZE = 25
 CAPITAL = 10000            # 🔥 Aapka 10k Capital
 RISK_PER_TRADE_PCT = 0.06  # 🔥 6% Risk kar diya (₹600 risk per trade)
@@ -256,4 +256,5 @@ if __name__ == "__main__":
     server_thread.start()
     
     run_pro_engine()
+
 
