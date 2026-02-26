@@ -19,11 +19,11 @@ PASSWORD = "6211"
 TOTP_SECRET = "ZHFAFO7SKLYN3FNJOBPZYNEGQI"
 TELEGRAM_TOKEN = "8291109950:AAE-vcehleqwpl0Bc-2o1dlaUOEQNWw9r-4"
 CHAT_ID = "1901759813"
-INDEX_TOKEN = "99926000" 
+INDEX_TOKEN = "26000"      # 🔥 FIX: Nifty ka actual Token 26000 kar diya hai
 LOT_SIZE = 25
-CAPITAL = 50000
-RISK_PER_TRADE_PCT = 0.02  # 2% Risk
-MAX_DAILY_LOSS = 3000      # Hard stop
+CAPITAL = 10000            # 🔥 Aapka 10k Capital
+RISK_PER_TRADE_PCT = 0.06  # 🔥 6% Risk kar diya (₹600 risk per trade)
+MAX_DAILY_LOSS = 1200      # 🔥 Ek din mein ₹1200 limit
 PAPER_TRADE = True         # Live karne ke liye False karein
 LOG_FILE = "bot_logs.txt"  # Live web logs ke liye file
 # =======================================================
@@ -33,16 +33,12 @@ def custom_print(msg, send_tg=False):
     time_str = dt.datetime.now().strftime('%H:%M:%S')
     full_msg = f"[{time_str}] {msg}"
     
-    # 1. Print in Render Dashboard
     print(full_msg, flush=True)
-    
-    # 2. Save for Web Browser (/logs URL)
     try:
         with open(LOG_FILE, "a") as f:
             f.write(full_msg + "<br>")
     except: pass
     
-    # 3. Send to Telegram
     if send_tg:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -79,10 +75,16 @@ def get_ohlc_data(obj, token, interval, days=5):
         "fromdate": (now - dt.timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
         "todate": now.strftime("%Y-%m-%d %H:%M")
     })
-    if res and res.get("data"):
-        df = pd.DataFrame(res["data"], columns=['date','o','h','l','c','v'])
-        df[['h','l','c']] = df[['h','l','c']].astype(float)
-        return df
+    
+    # 🔥 FIX: Actual Angel One Error pakadne ka logic
+    if res and res.get("status"):
+        if res.get("data"):
+            df = pd.DataFrame(res["data"], columns=['date','o','h','l','c','v'])
+            df[['h','l','c']] = df[['h','l','c']].astype(float)
+            return df
+            
+    error_msg = res.get('message', 'Unknown Error / Empty Data') if res else 'No Response from API'
+    custom_print(f"⚠️ API Error ({interval}): {error_msg}")
     return None
 
 def get_atm_option(df_master, spot_price, opt_type):
@@ -95,14 +97,22 @@ def get_atm_option(df_master, spot_price, opt_type):
     return (df.iloc[0]['token'], df.iloc[0]['symbol']) if not df.empty else (None, None)
 
 def run_pro_engine():
-    # Pehle purani log file delete kar dete hain naye session ke liye
     if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
     
     custom_print("="*50)
     custom_print("🚀 INITIALIZING SMARTAPI CONNECTION...")
+    
+    # 🔥 FIX: Strict Login Verification
     obj = SmartConnect(api_key=API_KEY)
     totp = pyotp.TOTP(TOTP_SECRET).now()
-    obj.generateSession(CLIENT_ID, PASSWORD, totp)
+    session = obj.generateSession(CLIENT_ID, PASSWORD, totp)
+    
+    if not session or session.get('status') is False:
+        msg = session.get('message', 'Unknown Error') if session else 'No Response'
+        custom_print(f"❌ LOGIN FAILED: {msg}")
+        custom_print("Bot Stopped. Please check API Key, Password, or TOTP.", send_tg=True)
+        return
+        
     custom_print("✅ CONNECTION SUCCESSFUL!")
     custom_print("="*50)
     
@@ -123,7 +133,7 @@ def run_pro_engine():
         # Market Time Check
         if not (dt.time(9,20) <= now.time() <= dt.time(15,10)):
             custom_print("💤 💓 Bot Alive - Market Closed. Waiting...")
-            time.sleep(30)
+            time.sleep(60)
             continue
             
         if daily_pnl <= -MAX_DAILY_LOSS:
@@ -135,7 +145,7 @@ def run_pro_engine():
             df_5 = get_ohlc_data(obj, INDEX_TOKEN, "FIVE_MINUTE")
             
             if df_15 is None or df_5 is None:
-                custom_print("⚠️ API returned empty data. Retrying...")
+                # Agar API error aaya toh upar custom_print ho chuka hoga
                 time.sleep(10); continue
 
             # Technicals
@@ -205,7 +215,6 @@ def run_pro_engine():
         
         time.sleep(30)
 
-
 # ================= FLASK SERVER (Web Logs System) =================
 app = Flask(__name__)
 
@@ -217,18 +226,17 @@ def home():
 def show_logs():
     try:
         with open(LOG_FILE, "r") as f:
-            # Sirf last 100 lines dikhayega taaki page load hone me time na lage
             lines = f.readlines()[-100:]
             content = "".join(lines)
     except:
         content = "Waiting for bot to generate logs..."
         
-    # Ek cool 'Hacker' style black screen look
     html = f"""
     <html>
         <head>
             <title>Live Bot Logs</title>
-            <meta http-equiv="refresh" content="30"> </head>
+            <meta http-equiv="refresh" content="30">
+        </head>
         <body style='background-color:black; color:lime; font-family:monospace; padding: 20px;'>
             <h2>🚀 LIVE TRADING TERMINAL</h2>
             <hr style='border-color:lime;'>
