@@ -255,15 +255,18 @@ def inner_trading_loop(obj, df_master_ref):
         df_master = df_master_ref['df']
 
         try:
-            df_15 = get_ohlc_data(obj, nifty_token, "FIFTEEN_MINUTE")
-            df_5  = get_ohlc_data(obj, nifty_token, "FIVE_MINUTE")
+            # ✅ CHANGED: 15 din ka data taaki EMA200 ke liye sufficient candles mil sakein
+            df_15 = get_ohlc_data(obj, nifty_token, "FIFTEEN_MINUTE", days=15)
+            df_5  = get_ohlc_data(obj, nifty_token, "FIVE_MINUTE", days=5)
 
             if df_15 is None or len(df_15) < 201:
-                custom_print("❌ 15m candles insufficient or fetch failed")
+                fetched = len(df_15) if df_15 is not None else 0
+                custom_print(f"❌ 15m candles insufficient ({fetched}/201) or fetch failed")
                 time.sleep(15)
                 continue
             if df_5 is None or len(df_5) < 15:
-                custom_print("❌ 5m candles insufficient or fetch failed")
+                fetched_5 = len(df_5) if df_5 is not None else 0
+                custom_print(f"❌ 5m candles insufficient ({fetched_5}/15) or fetch failed")
                 time.sleep(15)
                 continue
 
@@ -433,4 +436,3 @@ if __name__ == "__main__":
     server_thread.start()
     custom_print(f"🌐 Web server port {os.environ.get('PORT', 10000)} pe chalu hua")
     run_pro_engine()
-
