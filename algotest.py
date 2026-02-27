@@ -80,33 +80,11 @@ def is_expiry_day(today, index_name):
     return today.weekday() == expiry_weekday
 
 def is_in_trading_window(now, index_name="NIFTY"):
-    t     = now.time()
-    today = now.date()
-
+    # 🔥 TEMP TEST MODE — No time restriction
     if now.weekday() >= 5:
         return False, "Weekend — market closed"
-    if t < TRADING_START:
-        return False, f"Pre-market — entries open at {TRADING_START}"
-    if t >= TRADING_HARD_STOP:
-        return False, f"Hard stop — no new entries after {TRADING_HARD_STOP}"
 
-    if is_expiry_day(today, index_name):
-        effective_cutoff = get_effective_expiry_cutoff(today, index_name)
-        expiry_weekday   = INDEX_CONFIG[index_name]["weekly_expiry_weekday"]
-        day_name         = calendar.day_name[expiry_weekday]
-
-        if t >= effective_cutoff:
-            if STRICT_MONTHLY_EXPIRY and is_monthly_expiry_day(today, index_name):
-                return False, f"⛔ {index_name} monthly expiry restriction active (strict cutoff {effective_cutoff})."
-            return False, f"⛔ {index_name} {day_name} expiry restriction active (post {effective_cutoff})."
-        return True, f"{index_name} expiry window open ({TRADING_START}–{effective_cutoff})"
-
-    if t < NORMAL_MORNING_END:
-        return True, f"Morning session ({TRADING_START}–{NORMAL_MORNING_END})"
-    if NORMAL_MORNING_END <= t < MIDDAY_BLOCK_END:
-        return False, f"Midday block ({NORMAL_MORNING_END}–{MIDDAY_BLOCK_END})"
-    return False, f"Post-midday — system is morning-session only (hard stop at {TRADING_HARD_STOP})"
-
+    return True, "TEST MODE — Time filter disabled"
 # ======================== CORE FUNCTIONS ========================
 def custom_print(msg, send_tg=False):
     time_str = dt.datetime.now().strftime('%H:%M:%S')
@@ -455,3 +433,4 @@ if __name__ == "__main__":
     server_thread.start()
     custom_print(f"🌐 Web server port {os.environ.get('PORT', 10000)} pe chalu hua")
     run_pro_engine()
+
