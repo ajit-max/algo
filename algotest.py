@@ -7,7 +7,6 @@ import pyotp
 import warnings
 import os
 import threading
-import calendar
 from flask import Flask
 from SmartApi import SmartConnect
 
@@ -27,96 +26,67 @@ LOT_SIZE               = 25
 MAX_DAILY_LOSS         = 1200     # Adjusted for 10k Capital
 PAPER_TRADE            = True     # Live ke liye False karo
 LOG_FILE               = "bot_logs.txt"
-SESSION_REFRESH_HOURS  = 6
+SESSION_REFRESH_HOURS  = 5        # Changed to 5 for safety
 INSTRUMENT_REFRESH_MIN = 60
+MAX_TRADES_PER_DAY     = 3        # Control System Max Trades
 # ============================================================================
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║    TIME FILTER CONFIG (MODULE v3)                                ║
+# ║    TIME FILTER CONFIG & FUNCTION                                 ║
 # ╚══════════════════════════════════════════════════════════════════╝
 TRADING_START      = dt.time(9, 25)    
-NORMAL_MORNING_END = dt.time(11, 30)   
-MIDDAY_BLOCK_END   = dt.time(13, 30)   
-TRADING_HARD_STOP  = dt.time(14, 45)   
-
-INDEX_CONFIG = {
-    "NIFTY": {
-        "weekly_expiry_weekday": 1,  # 👈 100% CORRECT: Tuesday is Expiry
-        "expiry_cutoff_time":    dt.time(11, 0),
-    }
-}
-
-STRICT_MONTHLY_EXPIRY         = True
-MONTHLY_EXPIRY_REDUCTION_MIN  = 30   
-
-def get_last_expiry_weekday_of_month(year, month, target_weekday):
-    if month == 12:
-        last_day = dt.date(year + 1, 1, 1) - dt.timedelta(days=1)
-    else:
-        last_day = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
-    days_back = (last_day.weekday() - target_weekday) % 7
-    return last_day - dt.timedelta(days=days_back)
-
-def is_monthly_expiry_day(today, index_name):
-    config         = INDEX_CONFIG.get(index_name, {})
-    expiry_weekday = config.get("weekly_expiry_weekday")
-    if expiry_weekday is None: return False
-    last_expiry = get_last_expiry_weekday_of_month(today.year, today.month, expiry_weekday)
-    return today == last_expiry
-
-def get_effective_expiry_cutoff(today, index_name):
-    config      = INDEX_CONFIG.get(index_name, {})
-    base_cutoff = config.get("expiry_cutoff_time", dt.time(11, 0))
-    if STRICT_MONTHLY_EXPIRY and is_monthly_expiry_day(today, index_name):
-        dummy_dt   = dt.datetime.combine(today, base_cutoff)
-        strict_dt  = dummy_dt - dt.timedelta(minutes=MONTHLY_EXPIRY_REDUCTION_MIN)
-        return strict_dt.time()
-    return base_cutoff
-
-def is_expiry_day(today, index_name):
-    config         = INDEX_CONFIG.get(index_name, {})
-    expiry_weekday = config.get("weekly_expiry_weekday")
-    if expiry_weekday is None: return False
-    return today.weekday() == expiry_weekday
+TRADING_HARD_STOP  = dt.time(15, 15)   
 
 def is_in_trading_window(now, index_name="NIFTY"):
-    # 🔥 TEMP TEST MODE — No time restriction
+    t = now.time()
+
     if now.weekday() >= 5:
         return False, "Weekend — market closed"
+    if t < TRADING_START:
+        return False, f"Pre-market — entries open at {TRADING_START}"
+    if t >= TRADING_HARD_STOP:
+        return False, f"Hard stop — no new entries after {TRADING_HARD_STOP}"
 
-    return True, "TEST MODE — Time filter disabled"
+    return True, f"Full trading session active ({TRADING_START}–{TRADING_HARD_STOP})"
+
 # ======================== CORE FUNCTIONS ========================
 def custom_print(msg, send_tg=False):
     time_str = dt.datetime.now().strftime('%H:%M:%S')
-    full_msg  = f"[{time_str}] {msg}"
-    print(full_msg, flush=True)
+    
+    if "\n" in msg:
+        log_msg = f"[{time_str}] " + msg.replace("\n", " | ")
+    else:
+        log_msg = f"[{time_str}] {msg}"
+        
+    print(log_msg, flush=True)
     try:
         with open(LOG_FILE, "a") as f:
-            f.write(full_msg + "<br>\n")
+            f.write(log_msg + "<br>\n")
     except Exception: pass
+    
     if send_tg:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": CHAT_ID, "text": f"📢 {msg}"}, timeout=5)
+            requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
         except Exception as e:
-            print(f"[{time_str}] ⚠️ Telegram Error: {e}", flush=True)
+            pass
 
 def create_session():
     for attempt in range(3):
         try:
-            custom_print(f"🔐 SmartAPI Session Bana Raha Hoon (Attempt {attempt + 1})...")
+            custom_print(f"SYSTEM: Initializing SmartAPI Session (Attempt {attempt + 1})...")
             obj  = SmartConnect(api_key=API_KEY)
             totp = pyotp.TOTP(TOTP_SECRET).now()
             data = obj.generateSession(CLIENT_ID, PASSWORD, totp)
             if data and data.get("status"):
-                custom_print("✅ Session Ban Gaya!")
+                custom_print("SYSTEM: Session Established Successfully.")
                 return obj
             else:
-                custom_print(f"⚠️ Session Response: {data}")
+                custom_print(f"SYSTEM WARNING: Session Response: {data}")
         except Exception as e:
-            custom_print(f"⚠️ Session Error (Attempt {attempt + 1}): {e}")
+            custom_print(f"SYSTEM ERROR (Attempt {attempt + 1}): {e}")
         time.sleep(5)
-    custom_print("❌ FATAL: 3 baar try karne ke baad bhi session nahi bana.", send_tg=True)
+    custom_print("FATAL ERROR: Failed to create session after 3 attempts.", send_tg=True)
     return None
 
 def get_instrument_master():
@@ -124,18 +94,18 @@ def get_instrument_master():
     headers = {'User-Agent': 'Mozilla/5.0'}
     for attempt in range(3):
         try:
-            custom_print(f"📥 Instrument Master Download Ho Raha Hai (Attempt {attempt + 1})...")
+            custom_print(f"SYSTEM: Downloading Instrument Master (Attempt {attempt + 1})...")
             res = requests.get(url, headers=headers, timeout=30)
             if res.status_code == 200:
                 df            = pd.DataFrame(res.json())
                 df['expiry']  = pd.to_datetime(df['expiry'], errors='coerce')
                 df['strike']  = pd.to_numeric(df['strike'], errors='coerce')
-                custom_print(f"✅ Instrument Master Ready! Total Symbols: {len(df)}")
+                custom_print(f"SYSTEM: Instrument Master Ready. Total Symbols: {len(df)}")
                 return df
         except Exception as e:
-            custom_print(f"⚠️ Network Error: {e}")
+            custom_print(f"SYSTEM ERROR: Network Error: {e}")
         time.sleep(5)
-    custom_print("❌ FATAL: Instrument Master nahi aaya.", send_tg=True)
+    custom_print("FATAL ERROR: Failed to download Instrument Master.", send_tg=True)
     return None
 
 def get_nifty_spot_token(df_master):
@@ -145,7 +115,7 @@ def get_nifty_spot_token(df_master):
         df_nifty2 = df_master[(df_master['symbol'] == 'Nifty 50') & (df_master['exch_seg'] == 'NSE')]
         if not df_nifty2.empty: return str(df_nifty2.iloc[0]['token'])
     except Exception as e:
-        custom_print(f"⚠️ get_nifty_spot_token error: {e}")
+        pass
     return None
 
 def get_ohlc_data(obj, token, interval, days=5):
@@ -161,7 +131,7 @@ def get_ohlc_data(obj, token, interval, days=5):
             df[['o', 'h', 'l', 'c', 'v']] = df[['o', 'h', 'l', 'c', 'v']].astype(float)
             return df
     except Exception as e:
-        custom_print(f"⚠️ get_ohlc_data error: {e}")
+        pass
     return None
 
 def get_atm_option(df_master, spot_price, opt_type):
@@ -173,12 +143,12 @@ def get_atm_option(df_master, spot_price, opt_type):
         df = df[df['expiry'] >= dt.datetime.now()].sort_values(by='expiry')
         if not df.empty: return df.iloc[0]['token'], df.iloc[0]['symbol']
     except Exception as e:
-        custom_print(f"⚠️ get_atm_option error: {e}")
+        pass
     return None, None
 
 def place_order(obj, symbol, token, transaction_type, qty):
     if PAPER_TRADE:
-        custom_print(f"📝 [PAPER TRADE] {transaction_type} | {symbol} | Qty: {qty}")
+        custom_print(f"PAPER TRADE EXECUTION: {transaction_type} | {symbol} | Qty: {qty}")
         return True
     try:
         res = obj.placeOrder({
@@ -186,10 +156,10 @@ def place_order(obj, symbol, token, transaction_type, qty):
             "transactiontype": transaction_type, "exchange": "NFO", "ordertype": "MARKET",
             "producttype": "INTRADAY", "duration": "DAY", "quantity": str(qty)
         })
-        custom_print(f"✅ Order Placed: {transaction_type} {qty} {symbol} | Res: {res}")
+        custom_print(f"LIVE ORDER PLACED: {transaction_type} {qty} {symbol} | Response: {res}")
         return True
     except Exception as e:
-        custom_print(f"❌ Order Error: {e}", send_tg=True)
+        custom_print(f"ORDER ERROR: {e}", send_tg=True)
         return False
 
 # ======================== MAIN TRADING LOOP ========================
@@ -200,25 +170,44 @@ def inner_trading_loop(obj, df_master_ref):
     trade_active           = False
     trade                  = {}
     daily_pnl              = 0
+    trade_count            = 0
+    last_exit_time         = None
+    eod_locked             = False
+    daily_loss_locked      = False
+    last_trade_direction   = None
+    current_trade_date     = dt.datetime.now().date()
+    
     last_inst_refresh      = dt.datetime.now()
     last_time_block_reason = None
     entry_window_printed   = False
 
     nifty_token = get_nifty_spot_token(df_master_ref['df'])
     if nifty_token is None:
-        custom_print("❌ NIFTY token nahi mila. Loop band ho raha hai.")
+        custom_print("SYSTEM ERROR: NIFTY spot token missing. Terminating loop.")
         return "STOP"
 
-    custom_print(f"💎 PRO-BOT ACTIVE | NIFTY Token: {nifty_token} | Qty: {TRADE_QTY}", send_tg=True)
+    custom_print(f"SYSTEM ACTIVE | NIFTY Token: {nifty_token} | Qty: {TRADE_QTY}", send_tg=True)
 
     while True:
         now = dt.datetime.now()
 
-        # ── TIME FILTER INTEGRATION (v3) ──────────────────────
+        # ── STRUCTURED DAILY RESET ──
+        if now.date() > current_trade_date:
+            trade_count = 0
+            daily_pnl = 0
+            last_exit_time = None
+            eod_locked = False
+            daily_loss_locked = False
+            last_trade_direction = None
+            current_trade_date = now.date()
+            entry_window_printed = False
+            custom_print("SYSTEM RESET: Daily limits and constraints refreshed for the new trading session.")
+
+        # ── TIME FILTER INTEGRATION ──
         in_window, window_reason = is_in_trading_window(now, index_name="NIFTY")
 
         if in_window and not entry_window_printed:
-            custom_print("🟢 Entry Window Active")
+            custom_print("SYSTEM: Entry Window Active")
             entry_window_printed = True
         elif not in_window:
             entry_window_printed = False
@@ -226,129 +215,201 @@ def inner_trading_loop(obj, df_master_ref):
         if not in_window:
             if not trade_active:
                 if window_reason != last_time_block_reason:
-                    custom_print(f"⏰ {window_reason}")
+                    custom_print(f"SYSTEM FILTER: {window_reason}")
                     last_time_block_reason = window_reason
                 time.sleep(60)
                 continue
         else:
             if last_time_block_reason is not None and not trade_active:
-                custom_print(f"✅ Trading window open: {window_reason}")
+                custom_print(f"SYSTEM FILTER: Trading window open: {window_reason}")
                 last_time_block_reason = None
-        # ───────────────────────────────────────────────────────
 
         if daily_pnl <= -MAX_DAILY_LOSS:
-            custom_print(f"🛑 Max Daily Loss Rs{MAX_DAILY_LOSS} Hit Ho Gaya! Aaj ke liye trading band.", send_tg=True)
-            return "STOP"
+            if not daily_loss_locked:
+                custom_print("SYSTEM LOCKED – DAILY LOSS LIMIT HIT", send_tg=True)
+                daily_loss_locked = True
 
         mins_since = (now - last_inst_refresh).total_seconds() / 60
         if mins_since >= INSTRUMENT_REFRESH_MIN:
-            custom_print("🔄 Instrument Master Refresh Ho Raha Hai...")
             new_master = get_instrument_master()
             if new_master is not None:
                 df_master_ref['df'] = new_master
                 last_inst_refresh   = now
                 new_token = get_nifty_spot_token(df_master_ref['df'])
                 if new_token: nifty_token = new_token
-            else:
-                custom_print("⚠️ Instrument Master refresh fail, purana use ho raha hai.")
 
         df_master = df_master_ref['df']
 
         try:
-            # ✅ CHANGED: 15 din ka data taaki EMA200 ke liye sufficient candles mil sakein
+            # DO NOT CHANGE FETCH LOGIC
             df_15 = get_ohlc_data(obj, nifty_token, "FIFTEEN_MINUTE", days=15)
             df_5  = get_ohlc_data(obj, nifty_token, "FIVE_MINUTE", days=5)
 
-            if df_15 is None or len(df_15) < 201:
-                fetched = len(df_15) if df_15 is not None else 0
-                custom_print(f"❌ 15m candles insufficient ({fetched}/201) or fetch failed")
+            if df_15 is None or len(df_15) < 220:
                 time.sleep(15)
                 continue
             if df_5 is None or len(df_5) < 15:
-                fetched_5 = len(df_5) if df_5 is not None else 0
-                custom_print(f"❌ 5m candles insufficient ({fetched_5}/15) or fetch failed")
                 time.sleep(15)
                 continue
 
+            # ── INDICATOR CALCULATIONS ──
             ema_200_15   = talib.EMA(df_15['c'], 200).iloc[-1]
+            
+            atr_series   = talib.ATR(df_15['h'], df_15['l'], df_15['c'], 14)
+            atr_14_15    = atr_series.iloc[-1]
+            atr_avg      = talib.SMA(atr_series, 20).iloc[-1]
+            
             current_spot = df_15['c'].iloc[-1]
-            rsi_5        = talib.RSI(df_5['c'], 14).iloc[-1]
-            trend        = "BULL 🟢" if current_spot > ema_200_15 else "BEAR 🔴"
+            
+            rsi_5_series = talib.RSI(df_5['c'], 14)
+            rsi_prev     = rsi_5_series.iloc[-2]
+            rsi_curr     = rsi_5_series.iloc[-1]
+            
+            trend = "BULL" if current_spot > ema_200_15 else "BEAR"
 
-            # DEBUG HEARTBEAT
-            custom_print(f"💓 HEARTBEAT | 15m count: {len(df_15)} | 5m count: {len(df_5)} | Spot: {current_spot:.1f} | EMA200: {ema_200_15:.1f} | RSI: {rsi_5:.1f} | Trend: {trend} | trade_active: {trade_active}")
+            # ── COOLDOWN CALCULATION ──
+            cooldown_remaining = 0
+            if last_exit_time is not None:
+                elapsed_sec = (now - last_exit_time).total_seconds()
+                if elapsed_sec < 600:
+                    cooldown_remaining = int(600 - elapsed_sec)
+            
+            cooldown_str = f"{cooldown_remaining//60}m {cooldown_remaining%60}s" if cooldown_remaining > 0 else "0s"
 
-            # ----- EXIT LOGIC (Prioritized to ensure independent execution) -----
+            # ── CLEAN HEARTBEAT FORMAT ──
+            heartbeat_msg = (
+                f"HEARTBEAT:\n"
+                f"Time: {now.strftime('%H:%M:%S')} | Spot: {current_spot:.1f} | EMA: {ema_200_15:.1f} | RSI: {rsi_curr:.1f} | ATR: {atr_14_15:.1f} | Trend: {trend}\n"
+                f"TradeActive: {trade_active} | TradeCount: {trade_count}/{MAX_TRADES_PER_DAY} | DailyPnL: Rs {daily_pnl:.2f} | CooldownRemaining: {cooldown_str} | EODLocked: {eod_locked} | LossLocked: {daily_loss_locked}"
+            )
+            custom_print(heartbeat_msg)
+
+            # ── EXIT LOGIC ──
             if trade_active:
                 ltp_res = obj.ltpData("NFO", trade['symbol'], trade['token'])
                 if not ltp_res or not ltp_res.get("data"): 
-                    custom_print("❌ LTP fetch failed for option")
                     time.sleep(15)
                     continue
 
                 ltp = float(ltp_res["data"]["ltp"])
                 
-                if ltp > trade['entry'] * 1.10 and trade['sl'] < trade['entry']:
+                # Risk Management: Breakeven at 1R
+                if ltp >= (trade['entry'] + trade['sl_points']) and trade['sl'] < trade['entry']:
                     trade['sl'] = trade['entry']
-                    custom_print(f"🛡️ SL Breakeven Pe: {trade['entry']} | {trade['symbol']}", send_tg=True)
+                    custom_print(f"RISK CONTROL: SL modified to Breakeven at {trade['entry']} for {trade['symbol']}", send_tg=True)
 
                 reason = None
-                if ltp <= trade['sl']: reason = "StopLoss Hit 🛑"
-                elif ltp >= trade['target']: reason = "Target Hit 🎯"
-                elif now.time() >= dt.time(15, 10): reason = "EOD Square-off 🕒"
+                if ltp <= trade['sl']: reason = "StopLoss Hit"
+                elif ltp >= trade['target']: reason = "Target Hit"
+                elif now.time() >= dt.time(15, 20): reason = "EOD Square-off"
 
                 if reason:
                     place_order(obj, trade['symbol'], trade['token'], "SELL", trade['qty'])
                     pnl       = (ltp - trade['entry']) * trade['qty']
                     daily_pnl += pnl
-                    custom_print(f"🏁 EXIT: {reason} | PnL: Rs{round(pnl, 2)} | Daily: Rs{round(daily_pnl, 2)}", send_tg=True)
+                    last_exit_time = now
+                    
+                    exit_msg = (
+                        f"📊 Position: {trade['symbol']}\n"
+                        f"🚪 Exit Price: {ltp}\n"
+                        f"💰 PnL: Rs {round(pnl, 2)} (Daily: Rs {round(daily_pnl, 2)})\n"
+                        f"📢 Action: {reason} - Position Closed."
+                    )
+                    custom_print(exit_msg, send_tg=True)
+                    
                     trade_active = False
                     trade        = {}
+                    
+                    # EOD LOCK SYSTEM
+                    if reason == "EOD Square-off" or now.time() >= dt.time(15, 20):
+                        eod_locked = True
+                        custom_print("SYSTEM CONTROL: EOD Lock activated. No further entries permitted today.")
 
-            # ----- ENTRY LOGIC -----
-            elif not trade_active and in_window:
-                direction = None
-                if "BULL" in trend and rsi_5 > 65: direction = "CE"
-                elif "BEAR" in trend and rsi_5 < 35: direction = "PE"
-
-                if direction:
-                    token, symbol = get_atm_option(df_master, current_spot, direction)
-                    if not token: 
-                        custom_print("❌ ATM option not found for strike")
-                        time.sleep(30)
-                        continue
-
-                    ltp_res = obj.ltpData("NFO", symbol, token)
-                    if not ltp_res or not ltp_res.get("data"): 
-                        custom_print("❌ LTP fetch failed for option")
-                        time.sleep(15)
-                        continue
-
-                    opt_ltp   = float(ltp_res["data"]["ltp"])
-                    sl_points = opt_ltp * 0.15
-                    qty       = TRADE_QTY
-
-                    success = place_order(obj, symbol, token, "BUY", qty)
-                    if success:
-                        trade = {
-                            "symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty,
-                            "sl": round(opt_ltp - sl_points, 2), "target": round(opt_ltp + (sl_points * 2), 2)
-                        }
-                        trade_active = True
-                        custom_print(f"🚀 ENTRY: {symbol} | Price: {opt_ltp} | Qty: {qty} | SL: {trade['sl']}", send_tg=True)
+            # ── ENTRY LOGIC ──
+            elif not trade_active and in_window and not eod_locked and not daily_loss_locked:
+                extreme_vol_threshold = current_spot * 0.01
+                
+                # Professional Trade Control Filters
+                if trade_count >= MAX_TRADES_PER_DAY:
+                    pass 
+                elif now.time() >= dt.time(15, 15): 
+                    pass # Hard Entry Cut-off
+                elif cooldown_remaining > 0:
+                    pass # 10 Minute Cooldown Active
+                elif atr_14_15 < atr_avg:
+                    pass # Skip entry (low volatility environment)
+                elif atr_14_15 > extreme_vol_threshold:
+                    pass # Skip entry (extreme volatility spike)
                 else:
-                    custom_print("⏭ Entry skipped — Conditions not met")
+                    direction = None
+                    if current_spot > ema_200_15 and rsi_prev <= 60 and rsi_curr > 60: 
+                        if last_trade_direction != "CE":
+                            direction = "CE"
+                    elif current_spot < ema_200_15 and rsi_prev >= 40 and rsi_curr < 40: 
+                        if last_trade_direction != "PE":
+                            direction = "PE"
+
+                    if direction:
+                        custom_print(f"PRE-ENTRY CHECK: Trend={trend} | RSI={rsi_curr:.1f} | ATR={atr_14_15:.1f} | TradeCount={trade_count}/{MAX_TRADES_PER_DAY} | Cooldown={cooldown_str}")
+                        
+                        token, symbol = get_atm_option(df_master, current_spot, direction)
+                        if not token: 
+                            time.sleep(30)
+                            continue
+
+                        ltp_res = obj.ltpData("NFO", symbol, token)
+                        if not ltp_res or not ltp_res.get("data"): 
+                            time.sleep(15)
+                            continue
+
+                        opt_ltp   = float(ltp_res["data"]["ltp"])
+                        
+                        risk_points = atr_14_15 * 0.5
+                        sl_points = opt_ltp * 0.12  # slightly tighter
+                        tgt_points = sl_points * 2.2
+                        qty       = TRADE_QTY
+
+                        success = place_order(obj, symbol, token, "BUY", qty)
+                        if success:
+                            trade = {
+                                "symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty,
+                                "sl_points": sl_points,
+                                "sl": round(opt_ltp - sl_points, 2), 
+                                "target": round(opt_ltp + tgt_points, 2)
+                            }
+                            trade_active = True
+                            trade_count += 1
+                            last_trade_direction = direction
+                            
+                            call_put_text = "CE" if direction == "CE" else "PE"
+                            time_str = now.strftime('%I:%M %p')
+                            entry_msg = (
+                                f"🚀 ENTRY SIGNAL: NIFTY {call_put_text}\n\n"
+                                f"📍 Index Spot: {current_spot:.1f}\n"
+                                f"🎯 Buy: {symbol} @ {opt_ltp}\n"
+                                f"🛑 StopLoss: {trade['sl']}\n"
+                                f"🏁 Target: {trade['target']}\n"
+                                f"🕒 Time: {time_str}"
+                            )
+                            custom_print(entry_msg, send_tg=True)
+                            if trade_count >= MAX_TRADES_PER_DAY:
+                                custom_print("SYSTEM CONTROL: Daily trade limit reached (3/3).")
 
         except Exception as e:
-            custom_print(f"⚠️ Loop Error: {e}")
+            custom_print(f"SYSTEM ERROR: Main Loop Exception: {e}")
             time.sleep(15)
             continue
 
         time.sleep(30)
-        hours_since = (dt.datetime.now() - session_start_time).total_seconds() / 3600
-        if hours_since >= SESSION_REFRESH_HOURS:
-            custom_print("🔄 Session refresh time aa gaya...")
-            return "REFRESH_SESSION"
+        
+        # ── SESSION SAFETY ──
+        if dt.time(15, 10) <= now.time() <= dt.time(15, 25):
+            pass 
+        else:
+            hours_since = (dt.datetime.now() - session_start_time).total_seconds() / 3600
+            if hours_since >= SESSION_REFRESH_HOURS:
+                custom_print("SYSTEM: Executing Scheduled Session Refresh...")
+                return "REFRESH_SESSION"
 
     return "STOP"
 
@@ -358,13 +419,13 @@ def run_pro_engine():
     if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
 
     custom_print("=" * 55)
-    custom_print("🚀 ALGO TRADING BOT SHURU HO RAHA HAI...")
-    custom_print(f"   Paper Mode: {PAPER_TRADE} | Qty: {TRADE_QTY} | Max Loss: Rs{MAX_DAILY_LOSS}")
+    custom_print("SYSTEM STARTING: ALGO TRADING ENGINE")
+    custom_print(f"Paper Mode: {PAPER_TRADE} | Qty: {TRADE_QTY} | Max Daily Loss: Rs{MAX_DAILY_LOSS}")
     custom_print("=" * 55)
 
     df_master = get_instrument_master()
     if df_master is None:
-        custom_print("❌ Instrument Master ke bina bot nahi chal sakta.")
+        custom_print("FATAL ERROR: Instrument Master mapping failed.")
         return
 
     df_master_ref = {'df': df_master}
@@ -380,14 +441,13 @@ def run_pro_engine():
         result = inner_trading_loop(obj, df_master_ref)
 
         if result == "REFRESH_SESSION":
-            custom_print("♻️ Session refresh ho raha hai...")
             time.sleep(2)
             continue
         elif result == "STOP":
             now      = dt.datetime.now()
             next_day = (now + dt.timedelta(days=1)).replace(hour=9, minute=10, second=0)
             sleep_sec = (next_day - now).total_seconds()
-            custom_print(f"💤 Aaj trading band. Next start: {next_day.strftime('%d-%m-%Y %H:%M')} ({int(sleep_sec/3600)} ghante baad)")
+            custom_print(f"SYSTEM OFF: Market closed. Resuming at {next_day.strftime('%d-%m-%Y %H:%M')}")
             time.sleep(max(sleep_sec, 3600))
             continue
 
@@ -396,8 +456,8 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    mode = "PAPER MODE" if PAPER_TRADE else "⚠️ LIVE MODE"
-    return f"<h1>✅ Algo Bot Running | {mode}</h1><p><a href='/logs'>📋 Live Logs Dekho</a></p><p>Qty: {TRADE_QTY} | Max Daily Loss: Rs{MAX_DAILY_LOSS}</p>"
+    mode = "PAPER MODE" if PAPER_TRADE else "LIVE MODE"
+    return f"<h1>Algo Bot Active | {mode}</h1><p><a href='/logs'>View Live Logs</a></p><p>Qty: {TRADE_QTY} | Max Daily Loss: Rs{MAX_DAILY_LOSS}</p>"
 
 @app.route('/logs')
 def show_logs():
@@ -406,19 +466,19 @@ def show_logs():
             lines   = f.readlines()[-150:]
             content = "".join(lines)
     except Exception:
-        content = "Bot abhi logs generate nahi kar raha..."
+        content = "Logs initializing..."
 
     mode_color = "yellow" if PAPER_TRADE else "red"
-    mode_text  = "PAPER" if PAPER_TRADE else "⚠️ LIVE"
+    mode_text  = "PAPER" if PAPER_TRADE else "LIVE"
 
     html = f"""
     <html>
         <head>
-            <title>Bot Logs</title>
+            <title>System Logs</title>
             <meta http-equiv="refresh" content="30">
         </head>
         <body style='background:black; color:lime; font-family:monospace; padding:20px;'>
-            <h2>🚀 LIVE TRADING TERMINAL</h2>
+            <h2>LIVE TRADING TERMINAL</h2>
             <p style='color:gray;'>Auto-refresh: 30s | Mode: <b style='color:{mode_color}'>{mode_text}</b> | Qty: <b>{TRADE_QTY}</b></p>
             <hr style='border-color:lime;'>
             {content}
@@ -434,5 +494,5 @@ def start_server():
 if __name__ == "__main__":
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
-    custom_print(f"🌐 Web server port {os.environ.get('PORT', 10000)} pe chalu hua")
+    custom_print(f"SYSTEM: Web interface active on port {os.environ.get('PORT', 10000)}")
     run_pro_engine()
