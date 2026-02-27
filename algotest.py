@@ -219,11 +219,12 @@ session_start_time = dt.datetime.now()
 
 def inner_trading_loop(obj, df_master_ref):
     global session_start_time
-    trade_active      = False
-    trade             = {}
-    daily_pnl         = 0
-    last_inst_refresh = dt.datetime.now()
+    trade_active           = False
+    trade                  = {}
+    daily_pnl              = 0
+    last_inst_refresh      = dt.datetime.now()
     last_time_block_reason = None
+    entry_window_printed   = False
 
     nifty_token = get_nifty_spot_token(df_master_ref['df'])
     if nifty_token is None:
@@ -237,6 +238,12 @@ def inner_trading_loop(obj, df_master_ref):
 
         # ── TIME FILTER INTEGRATION (v3) ──────────────────────
         in_window, window_reason = is_in_trading_window(now, index_name="NIFTY")
+
+        if in_window and not entry_window_printed:
+            custom_print("🟢 Entry Window Active")
+            entry_window_printed = True
+        elif not in_window:
+            entry_window_printed = False
 
         if not in_window:
             if not trade_active:
@@ -274,48 +281,29 @@ def inner_trading_loop(obj, df_master_ref):
             df_5  = get_ohlc_data(obj, nifty_token, "FIVE_MINUTE")
 
             if df_15 is None or len(df_15) < 201:
-                time.sleep(15); continue
+                custom_print("❌ 15m candles insufficient or fetch failed")
+                time.sleep(15)
+                continue
             if df_5 is None or len(df_5) < 15:
-                time.sleep(15); continue
+                custom_print("❌ 5m candles insufficient or fetch failed")
+                time.sleep(15)
+                continue
 
             ema_200_15   = talib.EMA(df_15['c'], 200).iloc[-1]
             current_spot = df_15['c'].iloc[-1]
             rsi_5        = talib.RSI(df_5['c'], 14).iloc[-1]
             trend        = "BULL 🟢" if current_spot > ema_200_15 else "BEAR 🔴"
 
+            # DEBUG HEARTBEAT
+            custom_print(f"💓 HEARTBEAT | 15m count: {len(df_15)} | 5m count: {len(df_5)} | Spot: {current_spot:.1f} | EMA200: {ema_200_15:.1f} | RSI: {rsi_5:.1f} | Trend: {trend} | trade_active: {trade_active}")
+
+            # ----- EXIT LOGIC (Prioritized to ensure independent execution) -----
             if trade_active:
-                custom_print(f"💓 Spot: {current_spot:.1f} | {trend} | RSI5: {rsi_5:.1f} | ACTIVE ({trade.get('symbol')})")
-
-            # ----- ENTRY LOGIC -----
-            if not trade_active and in_window:
-                direction = None
-                if "BULL" in trend and rsi_5 > 65: direction = "CE"
-                elif "BEAR" in trend and rsi_5 < 35: direction = "PE"
-
-                if direction:
-                    token, symbol = get_atm_option(df_master, current_spot, direction)
-                    if not token: time.sleep(30); continue
-
-                    ltp_res = obj.ltpData("NFO", symbol, token)
-                    if not ltp_res or not ltp_res.get("data"): time.sleep(15); continue
-
-                    opt_ltp   = float(ltp_res["data"]["ltp"])
-                    sl_points = opt_ltp * 0.15
-                    qty       = TRADE_QTY
-
-                    success = place_order(obj, symbol, token, "BUY", qty)
-                    if success:
-                        trade = {
-                            "symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty,
-                            "sl": round(opt_ltp - sl_points, 2), "target": round(opt_ltp + (sl_points * 2), 2)
-                        }
-                        trade_active = True
-                        custom_print(f"🚀 ENTRY: {symbol} | Price: {opt_ltp} | Qty: {qty} | SL: {trade['sl']}", send_tg=True)
-
-            # ----- EXIT LOGIC -----
-            elif trade_active:
                 ltp_res = obj.ltpData("NFO", trade['symbol'], trade['token'])
-                if not ltp_res or not ltp_res.get("data"): time.sleep(15); continue
+                if not ltp_res or not ltp_res.get("data"): 
+                    custom_print("❌ LTP fetch failed for option")
+                    time.sleep(15)
+                    continue
 
                 ltp = float(ltp_res["data"]["ltp"])
                 
@@ -335,6 +323,40 @@ def inner_trading_loop(obj, df_master_ref):
                     custom_print(f"🏁 EXIT: {reason} | PnL: Rs{round(pnl, 2)} | Daily: Rs{round(daily_pnl, 2)}", send_tg=True)
                     trade_active = False
                     trade        = {}
+
+            # ----- ENTRY LOGIC -----
+            elif not trade_active and in_window:
+                direction = None
+                if "BULL" in trend and rsi_5 > 65: direction = "CE"
+                elif "BEAR" in trend and rsi_5 < 35: direction = "PE"
+
+                if direction:
+                    token, symbol = get_atm_option(df_master, current_spot, direction)
+                    if not token: 
+                        custom_print("❌ ATM option not found for strike")
+                        time.sleep(30)
+                        continue
+
+                    ltp_res = obj.ltpData("NFO", symbol, token)
+                    if not ltp_res or not ltp_res.get("data"): 
+                        custom_print("❌ LTP fetch failed for option")
+                        time.sleep(15)
+                        continue
+
+                    opt_ltp   = float(ltp_res["data"]["ltp"])
+                    sl_points = opt_ltp * 0.15
+                    qty       = TRADE_QTY
+
+                    success = place_order(obj, symbol, token, "BUY", qty)
+                    if success:
+                        trade = {
+                            "symbol": symbol, "token": token, "entry": opt_ltp, "qty": qty,
+                            "sl": round(opt_ltp - sl_points, 2), "target": round(opt_ltp + (sl_points * 2), 2)
+                        }
+                        trade_active = True
+                        custom_print(f"🚀 ENTRY: {symbol} | Price: {opt_ltp} | Qty: {qty} | SL: {trade['sl']}", send_tg=True)
+                else:
+                    custom_print("⏭ Entry skipped — Conditions not met")
 
         except Exception as e:
             custom_print(f"⚠️ Loop Error: {e}")
